@@ -13,7 +13,8 @@ Author: NSM Barii
 
 
 
-import sys, argparse, requests
+import sys, argparse, requests, socket, ipaddress
+from scapy.all import ARP, Ether, srp
 
 # UI IMPORTS
 from rich.console import Console
@@ -50,6 +51,50 @@ COMMANDS = {
 
 class Samsung():
     """This class will demonstrate Samsung TV authentication bypass"""
+
+
+
+
+    @classmethod
+    def _wake_on_lan(cls, subnet, iface, ip=False, mac=False):
+        """This method will allow you to wake up the device with a lan query"""
+
+
+
+        # THIS IS ONLY FOR IF YOU DONT HAVE THE MAC ADDRESS
+        if not mac and ip:
+
+            console.print(f"[bold cyan][*] ARP scanning {subnet} on {iface} for {ip}...")
+
+            valid_subnet = ipaddress.ip_network(subnet, strict=False)
+            arp = Ether(dst="ff:ff:ff:ff:ff:ff") / ARP(pdst=str(valid_subnet))
+
+            response, _ = srp(arp, iface=iface, timeout=3, verbose=False)
+
+            for sent, recv in response:
+
+                if recv.psrc == ip:
+                    mac = recv.hwsrc
+                    console.print(f"[bold green][+] Found MAC for[bold green] {ip}: {mac}")
+                    break
+
+            if not mac: console.print(f"[bold red][!] Could not find MAC for {ip} on {subnet}"); return False
+
+
+        #  NO TO SEND THE MAGIC FREAKING PACKET LOLOLOLOL
+        mac_clean = mac.replace(":", "").replace("-", "")
+        mac_bytes = bytes.fromhex(mac_clean)
+        magic = b'\xff' * 6 + mac_bytes * 16
+
+
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
+
+            s.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
+            s.sendto(magic, ("255.255.255.255", 9))
+
+
+        console.print(f"[bold green][+] WOL sent to {mac} - your welcome")
+        return True
 
 
     @classmethod
@@ -233,6 +278,11 @@ class Samsung():
 
 
         parser.add_argument("--ip", help="Target Samsung TV IP")
+        parser.add_argument("--mac", help="Target Samsung TV MAC")
+        parser.add_argument("--subnet", help="Target IP subnet")
+        parser.add_argument("-i", help="Users interface")
+        parser.add_argument("-won", action="store_true", help="Wake that TV up boy")
+
         parser.add_argument("--scan", action="store_true", help="Run full bypass audit")
         parser.add_argument("--auth-bypass", action="store_true", help="Demo auth bypass only")
         parser.add_argument("--surveillance", action="store_true", help="Demo surveillance only")
@@ -257,7 +307,19 @@ class Samsung():
         if not args.ip: console.print(f"[bold red][!] Samsung TV IP needed and not given!"); sys.exit()
 
 
-        ip = args.ip
+        won = args.won
+        ip  = args.ip
+        mac = args.mac
+        subnet = args.subnet
+        iface  = args.i
+
+
+        if won: cls._wake_on_lan(ip=ip, mac=mac, subnet=subnet, iface=iface)
+
+    
+
+
+        
 
         if args.scan: cls._scan(ip=ip); sys.exit()
         if args.auth_bypass: cls._check_auth_bypass(ip=ip); sys.exit()
