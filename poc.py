@@ -314,11 +314,9 @@ class Samsung():
         iface  = args.i
 
 
-        if won: cls._wake_on_lan(ip=ip, mac=mac, subnet=subnet, iface=iface)
+        if won: cls._wake_on_lan(ip=ip, mac=mac, subnet=subnet, iface=iface); sys.exit();
 
     
-
-
         
 
         if args.scan: cls._scan(ip=ip); sys.exit()
