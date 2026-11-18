@@ -1,27 +1,31 @@
 
-# Samsung Tizen Smart TV — Authentication Bypass via Unauthenticated UPnP Services
+# Samsung Tizen Smart TV — Inconsistent Authentication Across Services
 
-> Samsung Tizen TVs gate remote control behind a WebSocket pairing popup on port 8001, but expose full device control (volume, mute, media playback, content injection) through unauthenticated UPnP services on port 9197 — bypassing the authentication mechanism entirely. Combined with Wake-on-LAN using a MAC address leaked via SSDP, the full attack chain works from a powered-off state with zero user interaction.
+> Samsung Tizen TVs gate remote control behind a WebSocket pairing popup on port 8001, but leave surveillance, device fingerprinting, geolocation, and app disruption completely unauthenticated across multiple other ports. Device authentication exists as a setting but is **OFF by default** and incomplete when enabled — it blocks writes but not reads, info disclosure, or app kill.
 
 ---
 
 ## Summary
 
-Samsung Tizen smart TVs implement a pairing-based authentication gate on port 8001 for WebSocket remote control. However, the same TV exposes UPnP DLNA services (RenderingControl, AVTransport) on port 9197 that provide equivalent or greater control with **zero authentication**. Additional services on ports 7678, 8001 (REST), and 9080 leak device identifiers, serial numbers, and the connected router's BSSID (a geolocation vector) — all without authentication.
+Samsung Tizen smart TVs have an inconsistent authentication model. Port 8001 requires a WebSocket pairing handshake, but ports 9197, 7678, 8080, 8001 (REST), and 8002 expose UPnP state reads, device info, and DIAL app control **without any authentication**. Even when the user manually enables device authentication, reads (surveillance), info disclosure (including router BSSID geolocation), and app kill still bypass it. The setting only blocks UPnP writes and DIAL app launch.
 
 ### Findings
 
-1. **Authentication bypass via UPnP (Port 9197)** — RenderingControl and AVTransport accept SOAP commands with no auth, no pairing, no token. An attacker on the LAN can set volume (0-100), mute/unmute, push arbitrary media URLs to the TV, and control playback (play/pause/stop/seek). Samsung's WebSocket pairing gate on port 8001 is completely bypassed.
+1. **Unauthenticated UPnP surveillance (Port 9197)** — RenderingControl and AVTransport accept SOAP read commands with no auth, no pairing, no token. An attacker on the LAN can read the current volume and mute state, query what media is playing (`GetMediaInfo`), and get the exact playback position and duration (`GetPositionInfo`). In the **default configuration** (device auth OFF), writes also work — SetVolume, SetMute, media push via `SetAVTransportURI`. When device auth is manually enabled, reads still bypass it but writes are blocked.
 
 2. **Unauthenticated device wake (WOL)** — The TV's MAC address is leaked via SSDP M-SEARCH responses (`WAKEUP: MAC=<addr>`). An attacker can Wake-on-LAN the TV from a powered-off state, wait for port 9197 to become available, and execute Finding 1. The TV never prompts the user.
 
-3. **Information disclosure (Ports 7678, 8001, 9080, 9197)** — Four separate services expose device identifiers without authentication:
+3. **Information disclosure (Ports 7678, 8001, 8002, 9080, 9197)** — Multiple services expose device identifiers without authentication, **even with device auth ON**:
    - Two distinct serial numbers (one via DIAL, one via DMR)
    - WiFi MAC address + screen mirroring P2P MAC
    - **Router BSSID** — maps to physical location via WiFi geolocation databases
    - Samsung device ID, two UUIDs, model number, internal model code
    - Netflix NRDP firmware version and build hash
    - OS version, country, language, resolution, developer mode state
+
+4. **Unauthenticated app kill via DIAL DELETE** — DIAL DELETE stops running apps (returns 200) with no auth, **even with device auth ON**. An attacker can force-close DIAL-registered apps (Netflix, YouTube, Amazon confirmed) while the user is watching. Samsung gates app launch (POST returns 401) but leaves app kill wide open.
+
+5. **DIAL auth bypass on port 8080 (default config only)** — Samsung runs a second DIAL server on port 8080 that bypasses the 401 auth gate on port 8001. In the **default configuration** (device auth OFF), app launch (POST) returns 201 on 8080. The server sets `Access-Control-Allow-Origin: *` and HTML form submissions omit the Origin header, enabling browser-based CSRF for app launch and app kill. When device auth is enabled, the launch bypass is blocked, but app enumeration (GET) and app kill (DELETE) still work from 8080.
 
 ---
 
@@ -33,44 +37,47 @@ Samsung explicitly treats unauthenticated device control as a security risk. The
 
 2. **The capabilities overlap.** Both the WebSocket (port 8001) and UPnP (port 9197) control the same TV — volume, mute, media playback. Samsung gated one path and left the other wide open. If unauthenticated control were acceptable, the WebSocket pairing gate would not exist.
 
-3. **UPnP provides *more* control than WebSocket.** The unauthenticated path isn't a reduced-privilege fallback — it's strictly more powerful. UPnP can push arbitrary media URLs to the screen (`SetAVTransportURI`), read what's currently playing (`GetMediaInfo`), and set exact volume levels (0-100). The "secured" WebSocket path cannot push media URLs at all.
+3. **UPnP exposes capabilities the WebSocket path does not.** UPnP can read what's currently playing (`GetMediaInfo`), get exact playback position, and in default config push arbitrary media URLs (`SetAVTransportURI`). The "secured" WebSocket path cannot do these things at all.
 
 4. **The pairing popup is a user consent mechanism.** It exists so the user can decide which devices control their TV. Port 9197 bypasses this consent entirely — the user is never informed, never prompted, and has no way to block it short of network-level firewall rules.
 
 5. **Samsung's own security model contradicts the exposure.** The REST API on port 8001 returns `"FrameTVSupport": "true"` and `"TokenAuthSupport": "true"` — Samsung's firmware explicitly references token-based authentication as a supported feature. The UPnP services ignore this entirely.
 
-A vendor cannot argue "it's by design" when they built an authentication mechanism for the same functionality on a different port. The existence of the pairing gate on 8001 is Samsung's own acknowledgment that unauthenticated control is a security concern. Port 9197 is a gap in that security model, not a feature.
+A vendor cannot argue "it's by design" when they built an authentication gate on one port and left overlapping functionality unprotected on another. The pairing gate on 8001 is Samsung's own acknowledgment that unauthenticated access is a security concern. The unprotected services on 9197 and 8080 are gaps in that model.
 
 ---
 
 ## Impact
 
-### Authentication Bypass
-- Samsung implements WebSocket pairing on port 8001 — the TV displays a popup asking "Allow this device?"
-- Port 9197 provides **equivalent control** with no pairing, no popup, no token
-- Any device on the LAN can control the TV silently
-- The user has no indication that control is occurring
+### What works regardless of device auth setting (always unauthenticated)
 
-### Content Injection
-- `SetAVTransportURI` pushes any media URL (video, audio, image) to the TV
-- Combined with `Play`, arbitrary content appears on screen with no user consent
-- Attack scenario: push malicious/offensive content to a TV in a public or shared space
+| Capability | Port | Detail |
+|---|---|---|
+| **Surveillance** | 9197 | `GetMediaInfo` returns what's playing, `GetPositionInfo` returns exact position/duration |
+| **Device fingerprinting** | 7678, 8001, 8002, 9080, 9197 | Serials, MACs, UUIDs, model, OS version, capabilities |
+| **Geolocation** | 8001 | Router BSSID in REST API → physical location via WiFi geolocation DBs |
+| **App kill** | 8001, 8080 | DIAL DELETE force-closes DIAL-registered apps (Netflix, YouTube, Amazon confirmed) |
+| **Wake-on-LAN** | SSDP | MAC leaked in `WAKEUP` header → power on TV remotely |
+| **Event subscription** | 9197 | Subscribe to state change events, TV pushes updates |
 
-### Surveillance
-- `GetMediaInfo` returns the URI of whatever is currently playing
-- `GetPositionInfo` returns the exact playback position and duration
-- An attacker can passively monitor what someone is watching
+### What works only in default config (device auth OFF — the default)
 
-### Full Chain from Power-Off
-1. SSDP M-SEARCH → TV leaks MAC address in `WAKEUP` header
-2. Wake-on-LAN → TV powers on
-3. `SetVolume(100)` + `SetAVTransportURI` + `Play` → blast arbitrary content
-4. Zero popups, zero pairing, zero user interaction at any step
+| Capability | Port | Detail |
+|---|---|---|
+| **Volume/mute control** | 9197 | `SetVolume` (0-100), `SetMute` — bypasses WebSocket pairing on 8001 |
+| **Media push** | 9197 | `SetAVTransportURI` + `Play` — push arbitrary content to screen |
+| **App launch** | 8080 | DIAL POST on second server bypasses 401 on 8001, CSRF via HTML form |
+
+### Device Authentication is OFF by Default
+- Samsung offers a "Device Authentication" toggle — **it ships OFF**
+- Out of the box, any LAN device gets read+write access with zero prompts
+- Even when manually enabled, it only blocks writes and app launch — surveillance, info disclosure, and app kill are not covered
+- Most users will never know this setting exists
 
 ### Geolocation
 - REST API on port 8001 exposes `ssid` field containing the **router's BSSID**
-- BSSID can be cross-referenced with WiFi geolocation databases (Google, Apple, WiGLE) to determine the TV's physical address
-- This extends the impact beyond the device itself to the household's location
+- BSSID maps to physical location via WiFi geolocation databases (Google, Apple, WiGLE)
+- Works without authentication regardless of device auth setting
 
 ---
 
@@ -105,7 +112,7 @@ curl -s -X POST \
   http://<SAMSUNG_IP>:9197/upnp/control/RenderingControl1
 ```
 
-**Set volume to 0 (no auth):**
+**Set volume to 0 (default config only — blocked when device auth is ON):**
 ```bash
 curl -s -X POST \
   -H 'Content-Type: text/xml; charset="utf-8"' \
@@ -125,28 +132,19 @@ python3 poc.py --discover
 
 | Port | Service | Auth | What it leaks/controls |
 |---|---|---|---|
-| **9197** | UPnP RenderingControl | **None** | Volume, mute — full audio control |
-| **9197** | UPnP AVTransport | **None** | Media push, play/pause/stop/seek — content injection |
+| **9197** | UPnP RenderingControl | **None** | Read volume/mute state (always); set volume/mute (default config only) |
+| **9197** | UPnP AVTransport | **None** | Read what's playing + position (always); media push (default config only) |
 | **9197** | UPnP DMR Descriptor | **None** | Serial, UUID, P2P MAC, model, ProductCap |
 | **7678** | DIAL/UPnP Descriptor | **None** | Serial, Samsung device ID, model, UUID |
 | **8001** | REST API `/api/v2/` | **None** | MAC, BSSID, model, UUID, OS, resolution, country, capabilities |
 | **8001** | WebSocket Remote | **Pairing** | Remote control keys (the only gated service) |
 | **9080** | Netflix NRDP | **None** | NRDP firmware version and build hash |
+| **8080** | DIAL (second server) | **None** | DIAL-registered app launch (bypasses 8001 gate), app kill, app enumeration, CORS `*` |
+| **8002** | SmartView SDK (SSL) | **None** | Same device info as 8001 over HTTPS, self-signed cert |
+| **8187** | AllShare (hidden) | **N/A** | Undocumented UPnP server, not advertised via SSDP, rejects all known actions |
 
 ---
 
-## Comparison: Samsung vs Roku Authentication
-
-| Capability | Roku | Samsung |
-|---|---|---|
-| Remote control auth | None (by design) | WebSocket pairing on 8001 — **bypassed via 9197** |
-| Volume control | Keypress only | Exact value (0-100), no auth |
-| Push media to screen | No | Yes (`SetAVTransportURI`), no auth |
-| Read what's playing | Active app name only | Full URI + position + duration |
-| Geolocation via BSSID | No | Yes — router BSSID in REST API |
-| Wake from power-off | No | Yes — WOL + leaked MAC |
-
----
 
 ## Remediation
 
@@ -155,10 +153,16 @@ Samsung should:
 2. Remove the router BSSID (`ssid` field) from the unauthenticated REST API response
 3. Restrict SSDP responses to not include the device MAC in `WAKEUP` headers
 4. Require authentication for the DIAL device descriptor on port 7678
+5. Gate DIAL DELETE (app kill) behind the same auth as DIAL POST (app launch)
+6. Remove or gate the second DIAL server on port 8080 — it bypasses the auth on 8001 entirely
+7. Remove `Access-Control-Allow-Origin: *` from port 8080 responses
+8. Enable device authentication **by default**, not as an opt-in setting
+9. Ensure device authentication covers UPnP reads, REST API info disclosure, and event subscriptions — not just writes
 
 ### User Mitigation
+- **Enable Device Authentication** in TV settings (Settings > General > External Device Manager > Device Connection Manager) — this is OFF by default
 - Isolate the TV on a separate VLAN or guest network
-- Block port 9197 inbound on the TV via router firewall rules
+- Block ports 9197, 8080, 8187 inbound on the TV via router firewall rules
 - Disable UPnP on the router if not needed
 
 ---
@@ -168,12 +172,15 @@ Samsung should:
 | Date | Action |
 |---|---|
 | 2026-11-17 | Discovery and initial verification |
+| 2026-11-18 | Findings 4-5 confirmed (DIAL app kill, 8080 auth bypass + CSRF) |
+| 2026-11-18 | Device authentication bypass confirmed (default OFF, incomplete when ON) |
 | TBD | Vendor notification (Samsung PSIRT) |
 | TBD | CVE submission |
 
 ---
 
-## Author
+## Authors
 
-**NSM Barii**
+- **NSM Barii**
+- **JakeSwiz (Swiz Security)**
 
