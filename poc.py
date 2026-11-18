@@ -45,6 +45,7 @@ COMMANDS = {
     "now":        ("avt",    "GetMediaInfo",     "<InstanceID>0</InstanceID>"),
     "position":   ("avt",    "GetPositionInfo",  "<InstanceID>0</InstanceID>"),
     "state":      ("avt",    "GetTransportInfo", "<InstanceID>0</InstanceID>"),
+    "push":       ("avt",    "SetAVTransportURI","<InstanceID>0</InstanceID><CurrentURI>{val}</CurrentURI><CurrentURIMetaData></CurrentURIMetaData>"),
 }
 
 
@@ -110,17 +111,20 @@ class Samsung():
             f'</s:Envelope>'
         )
 
-        response = requests.post(f"http://{ip}:{PORT}{path}", timeout=5, headers={
-            "Content-Type": 'text/xml; charset="utf-8"',
-            "SOAPAction":   f'"{ns}#{action}"',
-        }, data=envelope)
+        try:
+            response = requests.post(f"http://{ip}:{PORT}{path}", timeout=5, headers={
+                "Content-Type": 'text/xml; charset="utf-8"',
+                "SOAPAction":   f'"{ns}#{action}"',
+            }, data=envelope)
 
+            return response.status_code, response.text
 
-        status_code = response.status_code
-        text        = response.text
-
-
-        return status_code, text
+        except requests.exceptions.ConnectionError:
+            console.print(f"[bold red][!] Connection failed — TV may be off or unreachable")
+            return None, None
+        except requests.exceptions.Timeout:
+            console.print(f"[bold red][!] Request timed out — TV not responding on port {PORT}")
+            return None, None
 
 
     @classmethod
@@ -153,7 +157,12 @@ class Samsung():
 
         code, resp = cls._soap(ip, path, ns, action, body)
 
-        if verbose: console.print(f"[bold green][+] {action} [yellow] status_code: {code}")
+        if verbose and code: console.print(f"[bold green][+] {action} [yellow] status_code: {code}")
+
+        if code == 200 and resp:
+            for tag in ("CurrentVolume", "CurrentMute", "CurrentURI", "RelTime", "TrackDuration", "CurrentTransportState"):
+                v = cls._tag(resp, tag)
+                if v: console.print(f"[bold yellow]    {tag}: {v}")
 
         return code, resp
 
